@@ -344,6 +344,7 @@ def start_sensor_thread(params, cfg):
         hit_streak       = 0
         currently_active = False
         motion_ema       = 0.0   # exponential moving average of abs(motion_value)
+        presence_ema     = 0.0   # smoothing for presence_value to reduce single-sample spikes
         EMA_ALPHA        = 0.15  # smoothing factor — higher = faster response
 
         while True:
@@ -353,13 +354,22 @@ def start_sensor_thread(params, cfg):
                 if sensor.data_ready:
                     presence_value = float(sensor.presence_value)
                     motion_value   = float(sensor.motion_value)
-                    presence_hit   = bool(sensor.presence)
-                    motion_hit     = bool(sensor.motion)
 
+                    # Smooth raw values first; trigger checks use smoothed values in threshold mode.
+                    presence_ema = EMA_ALPHA * presence_value + (1.0 - EMA_ALPHA) * presence_ema
+                    motion_ema   = EMA_ALPHA * abs(motion_value) + (1.0 - EMA_ALPHA) * motion_ema
+
+                    # In threshold mode, rely on raw sensor magnitudes (EMA-smoothed) instead of
+                    # driver booleans, which can be overly sticky in some environments.
                     if presence_threshold > 0.0:
-                        presence_hit = presence_hit and (presence_value >= presence_threshold)
+                        presence_hit = presence_ema >= presence_threshold
+                    else:
+                        presence_hit = bool(sensor.presence)
+
                     if motion_threshold > 0.0:
-                        motion_hit = motion_hit and (abs(motion_value) >= motion_threshold)
+                        motion_hit = motion_ema >= motion_threshold
+                    else:
+                        motion_hit = bool(sensor.motion)
 
                     if presence_hit or motion_hit:
                         hit_streak = min(trigger_hits, hit_streak + 1)
@@ -369,8 +379,6 @@ def start_sensor_thread(params, cfg):
                     if hit_streak >= trigger_hits:
                         last_triggered = t_now
 
-                    # Smooth the raw motion magnitude for brightness driving
-                    motion_ema = EMA_ALPHA * abs(motion_value) + (1.0 - EMA_ALPHA) * motion_ema
             except Exception as exc:
                 log.warning("Sensor read error: %s", exc)
 
