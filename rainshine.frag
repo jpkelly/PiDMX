@@ -94,8 +94,17 @@ void main()
             color = vec3(0.0);
         }
     } else {
+        if (uRevealRows <= 0.0) {
+            color = vec3(0.0);
+            fragColor = vec4(color, 1.0);
+            return;
+        }
+
+        // Keep extra headroom equal to trail length during idle hide so
+        // existing trails can travel off-screen before the top is masked.
+        float visibleRows = min(float(ROWS), uRevealRows + float(trailLen));
         float distFromBottom = float(row);
-        if (distFromBottom >= uRevealRows) {
+        if (distFromBottom >= visibleRows) {
             color = vec3(0.0);
         }
     }
