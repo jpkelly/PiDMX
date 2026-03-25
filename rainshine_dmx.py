@@ -117,6 +117,9 @@ class Params:
         # Absolute time.perf_counter() values for spawn gates; -1.0 = gate disabled.
         self.spawn_gate_start_abs = -1.0
         self.spawn_gate_stop_abs  = -1.0
+        # Motion-driven brightness multiplier (1.0 when no sensor).
+        # Sensor thread smooths motion_value → [motion_base .. 1.0] range.
+        self.motion_scale = 1.0
         self.lock = threading.Lock()
 
     def update(self, **kwargs):
@@ -136,6 +139,7 @@ class Params:
                 self.active,
                 self.spawn_gate_start_abs,
                 self.spawn_gate_stop_abs,
+                self.motion_scale,
             )
 
 
@@ -313,6 +317,10 @@ def start_sensor_thread(params, cfg):
     presence_threshold = cfg.getfloat("sensor", "presence_threshold", fallback=0.0)
     motion_threshold   = cfg.getfloat("sensor", "motion_threshold", fallback=0.0)
     trigger_hits       = max(1, cfg.getint("sensor", "trigger_hits", fallback=1))
+    # Brightness floor when present but not moving (0.0–1.0 multiplier on params.brightness)
+    motion_base        = max(0.0, min(1.0, cfg.getfloat("sensor", "motion_brightness_base", fallback=0.35)))
+    # motion_value that maps to full brightness (tune to your environment)
+    motion_full        = max(1.0, cfg.getfloat("sensor", "motion_brightness_full", fallback=150.0))
     poll_interval      = 0.025  # 40 Hz
 
     def run():
@@ -335,6 +343,8 @@ def start_sensor_thread(params, cfg):
         last_triggered   = 0.0
         hit_streak       = 0
         currently_active = False
+        motion_ema       = 0.0   # exponential moving average of abs(motion_value)
+        EMA_ALPHA        = 0.15  # smoothing factor — higher = faster response
 
         while True:
             t_now = time.monotonic()
@@ -358,6 +368,9 @@ def start_sensor_thread(params, cfg):
 
                     if hit_streak >= trigger_hits:
                         last_triggered = t_now
+
+                    # Smooth the raw motion magnitude for brightness driving
+                    motion_ema = EMA_ALPHA * abs(motion_value) + (1.0 - EMA_ALPHA) * motion_ema
             except Exception as exc:
                 log.warning("Sensor read error: %s", exc)
 
@@ -379,6 +392,15 @@ def start_sensor_thread(params, cfg):
                     params.spawn_gate_stop_abs = time.perf_counter()
                 currently_active = False
                 log.debug("Sensor: deactivated — spawn gate closed, drops drain naturally")
+
+            # Drive brightness via motion: presence-only → motion_base, active motion → 1.0
+            if sensor_firing:
+                motion_t = min(motion_ema / motion_full, 1.0)
+                scale    = motion_base + (1.0 - motion_base) * motion_t
+            else:
+                scale = 0.0  # screen draining — let drops fade naturally (brightness irrelevant)
+            with params.lock:
+                params.motion_scale = scale
 
             time.sleep(poll_interval)
 
@@ -486,7 +508,7 @@ def main():
         t = frame_start - t0
 
         # Read live params
-        speed, trail, density, fps, brightness, active, spawn_gate_start_abs, spawn_gate_stop_abs = params.snapshot()
+        speed, trail, density, fps, brightness, active, spawn_gate_start_abs, spawn_gate_stop_abs, motion_scale = params.snapshot()
         frame_dur = 1.0 / fps
 
         try:
@@ -516,9 +538,10 @@ def main():
             fbo.read_into(raw_buf, components=3, alignment=1)
             np.take(raw_view, remap_lut, out=dmx_buf)
 
-            # Apply brightness scaling
-            if brightness < 1.0:
-                np.multiply(dmx_buf, brightness, out=dmx_scaled, casting="unsafe")
+            # Apply brightness scaling (motion_scale modulates brightness when sensor active)
+            effective_brightness = brightness * motion_scale
+            if effective_brightness < 1.0:
+                np.multiply(dmx_buf, effective_brightness, out=dmx_scaled, casting="unsafe")
             else:
                 np.copyto(dmx_scaled, dmx_buf)
         except Exception:
