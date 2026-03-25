@@ -313,7 +313,7 @@ def start_sensor_thread(params, cfg):
     presence_threshold = cfg.getfloat("sensor", "presence_threshold", fallback=0.0)
     motion_threshold   = cfg.getfloat("sensor", "motion_threshold", fallback=0.0)
     trigger_hits       = max(1, cfg.getint("sensor", "trigger_hits", fallback=1))
-    poll_interval      = 0.05  # 20 Hz
+    poll_interval      = 0.025  # 40 Hz
 
     def run():
         try:
