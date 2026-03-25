@@ -359,17 +359,20 @@ def start_sensor_thread(params, cfg):
                     presence_ema = EMA_ALPHA * presence_value + (1.0 - EMA_ALPHA) * presence_ema
                     motion_ema   = EMA_ALPHA * abs(motion_value) + (1.0 - EMA_ALPHA) * motion_ema
 
-                    # In threshold mode, rely on raw sensor magnitudes (EMA-smoothed) instead of
-                    # driver booleans, which can be overly sticky in some environments.
+                    # Threshold checks are validated by sensor booleans to avoid
+                    # idle false positives from baseline drift in raw values.
+                    presence_flag = bool(sensor.presence)
+                    motion_flag   = bool(sensor.motion)
+
                     if presence_threshold > 0.0:
-                        presence_hit = presence_ema >= presence_threshold
+                        presence_hit = presence_flag and (presence_ema >= presence_threshold)
                     else:
-                        presence_hit = bool(sensor.presence)
+                        presence_hit = presence_flag
 
                     if motion_threshold > 0.0:
-                        motion_hit = motion_ema >= motion_threshold
+                        motion_hit = motion_flag and (motion_ema >= motion_threshold)
                     else:
-                        motion_hit = bool(sensor.motion)
+                        motion_hit = motion_flag
 
                     if presence_hit or motion_hit:
                         hit_streak = min(trigger_hits, hit_streak + 1)
