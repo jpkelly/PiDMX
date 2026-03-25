@@ -24,7 +24,6 @@ vec3 hsv2rgb(float h, float s, float v) {
 
 void main()
 {
-    // Grid constants
     const int COLS = 10;
     const int ROWS = 30;
 
@@ -32,80 +31,62 @@ void main()
     int   trailLen = uTrailLen > 0 ? uTrailLen : 10;
     float density  = uDensity  > 0.0 ? uDensity  : 3.0;
 
-    // Screen is fully dark when inactive
+    // uActive=0: sensor mode not yet triggered — keep screen dark
     if (uActive < 0.5) {
         fragColor = vec4(0.0, 0.0, 0.0, 1.0);
         return;
     }
 
-    // When density < 1, it's a probability each column has 1 drop
-    // When density >= 1, it's the number of drops per column
-    int numDrops = max(int(ceil(density)), 1);
-
-    // Current pixel coordinate (integer) — use gl_FragCoord for exact pixel
-    int col = int(gl_FragCoord.x);
-    int row = int(gl_FragCoord.y);
-    col = clamp(col, 0, COLS - 1);
-    row = clamp(row, 0, ROWS - 1);
+    int numDrops    = max(int(ceil(density)), 1);
+    int col         = clamp(int(gl_FragCoord.x), 0, COLS - 1);
+    int row         = clamp(int(gl_FragCoord.y), 0, ROWS - 1);
 
     vec3 color = vec3(0.0);
 
-    // Extended virtual canvas: drops spawn trailLen rows above the visible screen
-    // so they always enter fully-formed from the top edge, with no clipping.
-    // cycle = ROWS + 2*trailLen  (off-screen buffer above + screen + exit buffer below)
-    int cycle = ROWS + 2 * trailLen;
-
-    // Virtual row for this fragment (0 = top of off-screen buffer, increases downward).
-    // GL row ROWS-1 = top of visible screen  → virtual row trailLen
-    // GL row 0      = bottom of visible screen → virtual row (trailLen + ROWS - 1)
-    int fragVirtual = trailLen + ROWS - 1 - row;
+    // Virtual canvas (0 = top of spawn buffer, increases downward):
+    //   0 .. trailLen-1          : off-screen spawn buffer above visible area
+    //   trailLen .. trailLen+ROWS-1 : visible screen (GL row ROWS-1 → trailLen)
+    //   trailLen+ROWS .. 2*trailLen+ROWS-1 : exit buffer below screen
+    // Total cycle = ROWS + 2*trailLen so a spawned drop always exits cleanly.
+    int cycleLen    = ROWS + 2 * trailLen;
+    int fragVirtual = trailLen + ROWS - 1 - row;  // increases downward
 
     for (int d = 0; d < numDrops; ++d) {
-        float seed  = hash2(float(col) + 0.5, float(d) + 0.5) * 1000.0;
-        float rate  = 0.5 + 0.5 * hash(seed + 1.0);
-        float phase = hash(seed + 2.0) * float(cycle);
+        float seed     = hash2(float(col) + 0.5, float(d) + 0.5) * 1000.0;
+        float rate     = 0.5 + 0.5 * hash(seed + 1.0);
+        float phase    = hash(seed + 2.0) * float(cycleLen);
+        float spdRate  = max(speed * rate, 0.001);
 
-        float totalProgress = phase + uTime * speed * rate;
-        float cycleF        = floor(totalProgress / float(cycle));
-        float headF         = totalProgress - cycleF * float(cycle);
+        float progress = phase + uTime * spdRate;
+        float cycleIdx = floor(progress / float(cycleLen));
+        float headF    = progress - cycleIdx * float(cycleLen);
 
-        // Spawn gate: only show drops whose cycle started after activation.
-        // Allow the current cycle if the drop's head was still in the off-screen
-        // spawn buffer at the moment activation happened (about to enter screen).
-        if (uSpawnGateStart >= 0.0) {
-            float progressAtStart = phase + uSpawnGateStart * speed * rate;
-            float cycleAtStart    = floor(progressAtStart / float(cycle));
-            float headFAtStart    = progressAtStart - cycleAtStart * float(cycle);
-            if (cycleF < cycleAtStart) continue;
-            if (cycleF == cycleAtStart && headFAtStart >= float(trailLen)) continue;
-        }
+        // Exact uTime when this drop cycle's head was at virtual row 0 (spawned)
+        float tSpawn   = (cycleIdx * float(cycleLen) - phase) / spdRate;
 
-        // Spawn gate: suppress new cycles that started after deactivation;
-        // in-flight drops at deactivation time continue until they exit naturally.
-        if (uSpawnGateStop >= 0.0) {
-            float progressAtStop = phase + uSpawnGateStop * speed * rate;
-            float cycleAtStop    = floor(progressAtStop / float(cycle));
-            if (cycleF > cycleAtStop) continue;
-        }
+        // Spawn gate — a cycle is shown only if it was spawned while sensor was active.
+        // Any cycle that passes this check runs to completion, never interrupted.
+        if (uSpawnGateStart >= 0.0 && tSpawn < uSpawnGateStart) continue;
+        if (uSpawnGateStop  >= 0.0 && tSpawn > uSpawnGateStop)  continue;
 
-        // Probabilistic density (density < 1.0): re-roll each cycle
+        // Probabilistic density
         if (density < 1.0) {
-            float roll = hash2(seed + 3.0, cycleF);
-            if (roll > density) continue;
+            if (hash2(seed + 3.0, cycleIdx) > density) continue;
         }
 
-        // Compute head/trail positions in virtual space (no wrap needed)
         int headVirtual = int(floor(headF));
-        int dist        = fragVirtual - headVirtual;
+
+        // Rain falls downward: head is at headVirtual, trail extends ABOVE it.
+        // Pixels above the head have a smaller row number → larger fragVirtual.
+        // dist = headVirtual - fragVirtual > 0 means fragment is above the head.
+        int dist = headVirtual - fragVirtual;
 
         if (dist == 0) {
-            color += vec3(1.0);  // white head pixel
+            color += vec3(1.0);               // bright white head
         } else if (dist > 0 && dist <= trailLen) {
-            float t          = float(dist) / float(trailLen);
-            float hue        = fract(t + hash(seed));
-            float saturation = 0.7 + 0.3 * (1.0 - t);
-            float brightness = 1.0 - t * t;
-            color           += hsv2rgb(hue, saturation, brightness);
+            float t   = float(dist) / float(trailLen);
+            float hue = fract(t + hash(seed));
+            color    += hsv2rgb(hue, 1.0, 1.0 - t);  // linear fade to black
         }
     }
 

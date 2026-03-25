@@ -335,16 +335,9 @@ def start_sensor_thread(params, cfg):
         last_triggered   = 0.0
         hit_streak       = 0
         currently_active = False
-        drain_deadline   = 0.0  # monotonic time after which we go fully dark
 
         while True:
             t_now = time.monotonic()
-
-            # After drain period, black out screen
-            if drain_deadline > 0.0 and t_now >= drain_deadline:
-                with params.lock:
-                    params.active = 0.0
-                drain_deadline = 0.0
 
             try:
                 if sensor.data_ready:
@@ -371,27 +364,21 @@ def start_sensor_thread(params, cfg):
             sensor_firing = (t_now - last_triggered) < hold
 
             if sensor_firing and not currently_active:
-                # Activate: open spawn gate from now; drops form off-screen then enter
+                # Open spawn gate: new drop cycles begin forming off-screen above
                 with params.lock:
-                    params.active             = 1.0
+                    params.active               = 1.0
                     params.spawn_gate_start_abs = time.perf_counter()
                     params.spawn_gate_stop_abs  = -1.0
                 currently_active = True
-                drain_deadline   = 0.0
-                log.debug("Sensor: activated")
+                log.debug("Sensor: activated — spawn gate open")
 
             elif not sensor_firing and currently_active:
-                # Deactivate: close spawn gate; in-flight drops drain off naturally
-                t_abs = time.perf_counter()
+                # Close spawn gate: no new cycles start.
+                # Any drop already spawned runs its full life to the bottom — never hidden.
                 with params.lock:
-                    speed = params.speed
-                    trail = params.trail
-                    params.spawn_gate_stop_abs = t_abs
-                # Worst-case drain: drop just entering top needs ROWS+trail rows at min speed
-                drain_time = float(ROWS + trail) / max(speed * 0.5, 0.1) + 2.0
-                drain_deadline   = t_now + drain_time
+                    params.spawn_gate_stop_abs = time.perf_counter()
                 currently_active = False
-                log.debug("Sensor: deactivated, drain in %.1fs", drain_time)
+                log.debug("Sensor: deactivated — spawn gate closed, drops drain naturally")
 
             time.sleep(poll_interval)
 
