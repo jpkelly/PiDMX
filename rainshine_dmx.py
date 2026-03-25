@@ -359,7 +359,7 @@ def start_sensor_thread(params, cfg):
                     if presence_threshold > 0.0:
                         presence_hit = presence_hit and (presence_value >= presence_threshold)
                     if motion_threshold > 0.0:
-                        motion_hit = motion_hit and (motion_value >= motion_threshold)
+                        motion_hit = motion_hit and (abs(motion_value) >= motion_threshold)
 
                     if presence_hit or motion_hit:
                         hit_streak = min(trigger_hits, hit_streak + 1)
@@ -394,11 +394,9 @@ def start_sensor_thread(params, cfg):
                 log.debug("Sensor: deactivated — spawn gate closed, drops drain naturally")
 
             # Drive brightness via motion: presence-only → motion_base, active motion → 1.0
-            if sensor_firing:
-                motion_t = min(motion_ema / motion_full, 1.0)
-                scale    = motion_base + (1.0 - motion_base) * motion_t
-            else:
-                scale = 0.0  # screen draining — let drops fade naturally (brightness irrelevant)
+            # When sensor hold has expired, keep motion_base so draining drops stay visible.
+            motion_t = min(motion_ema / motion_full, 1.0) if sensor_firing else 0.0
+            scale    = motion_base + (1.0 - motion_base) * motion_t
             with params.lock:
                 params.motion_scale = scale
 
