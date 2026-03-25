@@ -394,8 +394,9 @@ def start_sensor_thread(params, cfg):
                 log.debug("Sensor: deactivated — spawn gate closed, drops drain naturally")
 
             # Drive brightness via motion: presence-only → motion_base, active motion → 1.0
-            # When sensor hold has expired, keep motion_base so draining drops stay visible.
-            motion_t = min(motion_ema / motion_full, 1.0) if sensor_firing else 0.0
+            # Always use the live EMA — never snap to 0 on hold expiry.
+            # When person leaves, sensor motion_value returns to 0 and EMA decays naturally.
+            motion_t = min(motion_ema / motion_full, 1.0)
             scale    = motion_base + (1.0 - motion_base) * motion_t
             with params.lock:
                 params.motion_scale = scale
