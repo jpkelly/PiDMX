@@ -86,7 +86,7 @@ void main()
         } else if (dist > 0 && dist <= trailLen) {
             float t   = float(dist) / float(trailLen);
             float hue = fract(t + hash2(seed, cycleIdx));  // new hue each cycle pass
-            color    += hsv2rgb(hue, 1.0, 1.0 - t);  // linear fade to black
+            color    += hsv2rgb(hue, 1.0, smoothstep(1.0, 0.0, t));  // smooth ease to black
         }
     }
 
