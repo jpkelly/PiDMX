@@ -153,6 +153,12 @@ enabled = false
 trigger_hold = 10.0
 # Seconds to ramp from hidden → fully visible (and back)
 ramp_time = 1.5
+# Minimum raw values required to count as a trigger. Keep at 0 to disable
+# value filtering and rely only on sensor.presence/sensor.motion booleans.
+presence_threshold = 0.0
+motion_threshold = 0.0
+# Number of consecutive trigger hits required before activation.
+trigger_hits = 1
 """
 
 
@@ -295,6 +301,9 @@ def start_sensor_thread(params, cfg):
 
     hold      = cfg.getfloat("sensor", "trigger_hold", fallback=10.0)
     ramp_time = max(0.01, cfg.getfloat("sensor", "ramp_time", fallback=1.5))
+    presence_threshold = cfg.getfloat("sensor", "presence_threshold", fallback=0.0)
+    motion_threshold = cfg.getfloat("sensor", "motion_threshold", fallback=0.0)
+    trigger_hits = max(1, cfg.getint("sensor", "trigger_hits", fallback=1))
     poll_interval = 0.05                               # 20 Hz
     step = float(ROWS) / ramp_time * poll_interval     # rows revealed per poll tick
 
@@ -304,7 +313,13 @@ def start_sensor_thread(params, cfg):
             import adafruit_sths34pf80                 # noqa: PLC0415
             i2c   = board.I2C()
             sensor = adafruit_sths34pf80.STHS34PF80(i2c)
-            log.info("STHS34PF80 sensor ready — presence detection active")
+            log.info(
+                "STHS34PF80 sensor ready — presence detection active "
+                "(presence_threshold=%.2f, motion_threshold=%.2f, trigger_hits=%d)",
+                presence_threshold,
+                motion_threshold,
+                trigger_hits,
+            )
         except Exception as exc:
             log.warning("Sensor unavailable (%s) — rain fully visible", exc)
             with params.lock:
@@ -312,10 +327,27 @@ def start_sensor_thread(params, cfg):
             return
 
         last_triggered = 0.0
+        hit_streak = 0
         while True:
             try:
                 if sensor.data_ready:
-                    if sensor.presence or sensor.motion:
+                    presence_value = float(sensor.presence_value)
+                    motion_value = float(sensor.motion_value)
+
+                    presence_hit = bool(sensor.presence)
+                    motion_hit = bool(sensor.motion)
+
+                    if presence_threshold > 0.0:
+                        presence_hit = presence_hit and (presence_value >= presence_threshold)
+                    if motion_threshold > 0.0:
+                        motion_hit = motion_hit and (motion_value >= motion_threshold)
+
+                    if presence_hit or motion_hit:
+                        hit_streak = min(trigger_hits, hit_streak + 1)
+                    else:
+                        hit_streak = 0
+
+                    if hit_streak >= trigger_hits:
                         last_triggered = time.monotonic()
             except Exception as exc:
                 log.warning("Sensor read error: %s", exc)
