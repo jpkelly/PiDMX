@@ -20,6 +20,13 @@ source ~/rainshine-env/bin/activate
 echo "=== Installing Python packages ==="
 pip3 install moderngl python-osc numpy
 
+echo "=== Enabling I2C ==="
+sudo raspi-config nonint do_i2c 0
+
+echo "=== Installing sensor library (optional — for STHS34PF80 IR presence sensor) ==="
+pip3 install adafruit-blinka adafruit-circuitpython-sths34pf80 || \
+    echo "  (Sensor library install failed — sensor features will be disabled at runtime)"
+
 echo "=== Installing systemd service ==="
 sudo cp ~/rainshine/rainshine.service /etc/systemd/system/
 sudo systemctl daemon-reload

@@ -105,12 +105,15 @@ def build_remap_lut(pixel_map, color_order, num_pixels):
 
 # ── Live parameters (shared between main loop and OSC thread) ────────────────
 class Params:
-    def __init__(self, speed=4.0, trail=10, density=3.0, fps=30.0, brightness=1.0):
+    def __init__(self, speed=4.0, trail=10, density=3.0, fps=30.0, brightness=1.0, reveal_rows=None):
         self.speed = speed
         self.trail = trail
         self.density = density
         self.fps = fps
         self.brightness = brightness
+        # reveal_rows: 0.0 = fully hidden (sensor idle), ROWS = fully visible.
+        # Defaults to ROWS so rain is visible when sensor is disabled.
+        self.reveal_rows = float(ROWS) if reveal_rows is None else float(reveal_rows)
         self.lock = threading.Lock()
 
     def update(self, **kwargs):
@@ -121,7 +124,7 @@ class Params:
 
     def snapshot(self):
         with self.lock:
-            return self.speed, self.trail, self.density, self.fps, self.brightness
+            return self.speed, self.trail, self.density, self.fps, self.brightness, self.reveal_rows
 
 
 DEFAULT_CONFIG = """\
@@ -142,6 +145,14 @@ sacn_dest = 10.0.0.123
 
 [osc]
 port = 7700
+
+[sensor]
+# Set enabled = true to activate STHS34PF80 IR presence sensor (I2C)
+enabled = false
+# Seconds to stay active after last detection
+trigger_hold = 10.0
+# Seconds to ramp from hidden → fully visible (and back)
+ramp_time = 1.5
 """
 
 
@@ -272,6 +283,59 @@ def start_osc_server(params, port):
     return server
 
 
+def start_sensor_thread(params, cfg):
+    """Start an STHS34PF80 IR presence sensor thread if enabled in config.
+
+    Smoothly ramps params.reveal_rows 0→ROWS on presence, ROWS→0 on idle.
+    If the sensor library or hardware is unavailable the thread exits silently
+    and reveal_rows is set to ROWS so the rain is fully visible.
+    """
+    if not cfg.getboolean("sensor", "enabled", fallback=False):
+        return None
+
+    hold      = cfg.getfloat("sensor", "trigger_hold", fallback=10.0)
+    ramp_time = max(0.01, cfg.getfloat("sensor", "ramp_time", fallback=1.5))
+    poll_interval = 0.05                               # 20 Hz
+    step = float(ROWS) / ramp_time * poll_interval     # rows revealed per poll tick
+
+    def run():
+        try:
+            import board                               # noqa: PLC0415
+            import adafruit_sths34pf80                 # noqa: PLC0415
+            i2c   = board.I2C()
+            sensor = adafruit_sths34pf80.STHS34PF80(i2c)
+            log.info("STHS34PF80 sensor ready — presence detection active")
+        except Exception as exc:
+            log.warning("Sensor unavailable (%s) — rain fully visible", exc)
+            with params.lock:
+                params.reveal_rows = float(ROWS)
+            return
+
+        last_triggered = 0.0
+        while True:
+            try:
+                if sensor.data_ready:
+                    if sensor.presence or sensor.motion:
+                        last_triggered = time.monotonic()
+            except Exception as exc:
+                log.warning("Sensor read error: %s", exc)
+
+            active = (time.monotonic() - last_triggered) < hold
+            target = float(ROWS) if active else 0.0
+            with params.lock:
+                cur = params.reveal_rows
+                if cur < target:
+                    params.reveal_rows = min(target, cur + step)
+                elif cur > target:
+                    params.reveal_rows = max(target, cur - step)
+
+            time.sleep(poll_interval)
+
+    thread = threading.Thread(target=run, daemon=True, name="sensor")
+    thread.start()
+    return thread
+
+
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(levelname)s] %(message)s",
@@ -303,7 +367,12 @@ def main():
     log.info("Color order: %s", color_order_name.upper())
 
     # ── Live params ──────────────────────────────────────────────────────────
-    params = Params(speed=speed, trail=trail, density=density, fps=fps, brightness=brightness)
+    sensor_enabled = cfg.getboolean("sensor", "enabled", fallback=False)
+    # If sensor is active, start hidden (reveal_rows=0); sensor thread ramps it up on presence.
+    # If no sensor, start fully visible (reveal_rows=ROWS).
+    initial_reveal = 0.0 if sensor_enabled else float(ROWS)
+    params = Params(speed=speed, trail=trail, density=density, fps=fps, brightness=brightness,
+                    reveal_rows=initial_reveal)
 
     # ── GL context (headless EGL, OpenGL ES 3.1) ────────────────────────────
     ctx = moderngl.create_standalone_context(backend="egl", libgl="libGLESv2.so", require=310)
@@ -329,6 +398,13 @@ def main():
     # ── OSC server ───────────────────────────────────────────────────────────
     osc_server = start_osc_server(params, osc_port)
     log.info("OSC listening on port %d", osc_port)
+
+    # ── Sensor thread ─────────────────────────────────────────────────────────
+    start_sensor_thread(params, cfg)
+    if sensor_enabled:
+        log.info("Sensor mode: rain hidden until presence detected (hold=%.1fs, ramp=%.1fs)",
+                 cfg.getfloat("sensor", "trigger_hold", fallback=10.0),
+                 cfg.getfloat("sensor", "ramp_time", fallback=1.5))
 
     # ── Graceful shutdown ────────────────────────────────────────────────────
     running = True
@@ -363,7 +439,7 @@ def main():
         t = frame_start - t0
 
         # Read live params
-        speed, trail, density, fps, brightness = params.snapshot()
+        speed, trail, density, fps, brightness, reveal_rows = params.snapshot()
         frame_dur = 1.0 / fps
 
         try:
@@ -375,6 +451,8 @@ def main():
                 prog["uTrailLen"].value = trail
             if "uDensity" in prog:
                 prog["uDensity"].value = density
+            if "uRevealRows" in prog:
+                prog["uRevealRows"].value = reveal_rows
 
             fbo.use()
             vao.render(mode=moderngl.TRIANGLES, vertices=3)
