@@ -43,13 +43,13 @@ void main()
 
     vec3 color = vec3(0.0);
 
-    // Virtual canvas (0 = top of spawn buffer, increases downward):
-    //   0 .. trailLen-1          : off-screen spawn buffer above visible area
-    //   trailLen .. trailLen+ROWS-1 : visible screen (GL row ROWS-1 → trailLen)
-    //   trailLen+ROWS .. 2*trailLen+ROWS-1 : exit buffer below screen
-    // Total cycle = ROWS + 2*trailLen so a spawned drop always exits cleanly.
-    int cycleLen    = ROWS + 2 * trailLen;
-    int fragVirtual = trailLen + ROWS - 1 - row;  // increases downward
+    // Virtual canvas (0 = top of visible screen, increases downward):
+    //   0 .. ROWS-1              : visible screen (GL row ROWS-1 → 0)
+    //   ROWS .. ROWS+trailLen-1   : exit buffer below screen
+    // Drops spawn at virtual row 0 (top edge) — no entry buffer delay.
+    // Exit buffer lets the trail drain fully off the bottom.
+    int cycleLen    = ROWS + trailLen;
+    int fragVirtual = ROWS - 1 - row;  // increases downward
 
     for (int d = 0; d < numDrops; ++d) {
         float seed     = hash2(float(col) + 0.5, float(d) + 0.5) * 1000.0;
@@ -61,7 +61,7 @@ void main()
         float cycleIdx = floor(progress / float(cycleLen));
         float headF    = progress - cycleIdx * float(cycleLen);
 
-        // Exact uTime when this drop cycle's head was at virtual row 0 (spawned)
+        // Exact uTime when this drop cycle's head was at virtual row 0 (top of screen)
         float tSpawn   = (cycleIdx * float(cycleLen) - phase) / spdRate;
 
         // Spawn gate — a cycle is shown only if it was spawned while sensor was active.
