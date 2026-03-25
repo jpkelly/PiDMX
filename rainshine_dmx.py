@@ -105,26 +105,18 @@ def build_remap_lut(pixel_map, color_order, num_pixels):
 
 # ── Live parameters (shared between main loop and OSC thread) ────────────────
 class Params:
-    def __init__(
-        self,
-        speed=4.0,
-        trail=10,
-        density=3.0,
-        fps=30.0,
-        brightness=1.0,
-        reveal_rows=None,
-        sensor_active=1.0,
-    ):
+    def __init__(self, speed=4.0, trail=10, density=3.0, fps=30.0, brightness=1.0, sensor_enabled=False):
         self.speed = speed
         self.trail = trail
         self.density = density
         self.fps = fps
         self.brightness = brightness
-        # reveal_rows: 0.0 = fully hidden (sensor idle), ROWS = fully visible.
-        # Defaults to ROWS so rain is visible when sensor is disabled.
-        self.reveal_rows = float(ROWS) if reveal_rows is None else float(reveal_rows)
-        # 1.0 while sensor is actively revealing, 0.0 while idling/hiding.
-        self.sensor_active = float(sensor_active)
+        # Spawn-gate control for sensor-driven rain.
+        # active=0.0 keeps screen dark until sensor triggers; 1.0 = rain visible.
+        self.active = 0.0 if sensor_enabled else 1.0
+        # Absolute time.perf_counter() values for spawn gates; -1.0 = gate disabled.
+        self.spawn_gate_start_abs = -1.0
+        self.spawn_gate_stop_abs  = -1.0
         self.lock = threading.Lock()
 
     def update(self, **kwargs):
@@ -141,8 +133,9 @@ class Params:
                 self.density,
                 self.fps,
                 self.brightness,
-                self.reveal_rows,
-                self.sensor_active,
+                self.active,
+                self.spawn_gate_start_abs,
+                self.spawn_gate_stop_abs,
             )
 
 
@@ -168,15 +161,12 @@ port = 7700
 [sensor]
 # Set enabled = true to activate STHS34PF80 IR presence sensor (I2C)
 enabled = false
-# Seconds to stay active after last detection
+# Seconds to hold active state after last detection
 trigger_hold = 10.0
-# Seconds to ramp from hidden → fully visible (and back)
-ramp_time = 1.5
-# Minimum raw values required to count as a trigger. Keep at 0 to disable
-# value filtering and rely only on sensor.presence/sensor.motion booleans.
+# Minimum raw values required to count as a trigger (0.0 = use sensor booleans only)
 presence_threshold = 0.0
 motion_threshold = 0.0
-# Number of consecutive trigger hits required before activation.
+# Consecutive trigger hits required before activation (debounce)
 trigger_hits = 1
 """
 
@@ -311,51 +301,57 @@ def start_osc_server(params, port):
 def start_sensor_thread(params, cfg):
     """Start an STHS34PF80 IR presence sensor thread if enabled in config.
 
-    Smoothly ramps params.reveal_rows 0→ROWS on presence, ROWS→0 on idle.
-    If the sensor library or hardware is unavailable the thread exits silently
-    and reveal_rows is set to ROWS so the rain is fully visible.
+    On presence: opens a spawn gate so drops enter from the off-screen buffer
+    above the visible area, always appearing fully-formed at the top edge.
+    On idle: closes the spawn gate so in-flight drops exit naturally off the
+    bottom before the screen goes dark.  No masking used.
     """
     if not cfg.getboolean("sensor", "enabled", fallback=False):
         return None
 
-    hold      = cfg.getfloat("sensor", "trigger_hold", fallback=10.0)
-    ramp_time = max(0.01, cfg.getfloat("sensor", "ramp_time", fallback=1.5))
+    hold               = cfg.getfloat("sensor", "trigger_hold", fallback=10.0)
     presence_threshold = cfg.getfloat("sensor", "presence_threshold", fallback=0.0)
-    motion_threshold = cfg.getfloat("sensor", "motion_threshold", fallback=0.0)
-    trigger_hits = max(1, cfg.getint("sensor", "trigger_hits", fallback=1))
-    poll_interval = 0.05                               # 20 Hz
-    step = float(ROWS) / ramp_time * poll_interval     # rows revealed per poll tick
+    motion_threshold   = cfg.getfloat("sensor", "motion_threshold", fallback=0.0)
+    trigger_hits       = max(1, cfg.getint("sensor", "trigger_hits", fallback=1))
+    poll_interval      = 0.05  # 20 Hz
 
     def run():
         try:
-            import board                               # noqa: PLC0415
-            import adafruit_sths34pf80                 # noqa: PLC0415
-            i2c   = board.I2C()
+            import board                    # noqa: PLC0415
+            import adafruit_sths34pf80      # noqa: PLC0415
+            i2c    = board.I2C()
             sensor = adafruit_sths34pf80.STHS34PF80(i2c)
             log.info(
                 "STHS34PF80 sensor ready — presence detection active "
                 "(presence_threshold=%.2f, motion_threshold=%.2f, trigger_hits=%d)",
-                presence_threshold,
-                motion_threshold,
-                trigger_hits,
+                presence_threshold, motion_threshold, trigger_hits,
             )
         except Exception as exc:
             log.warning("Sensor unavailable (%s) — rain fully visible", exc)
             with params.lock:
-                params.reveal_rows = float(ROWS)
-                params.sensor_active = 1.0
+                params.active = 1.0
             return
 
-        last_triggered = 0.0
-        hit_streak = 0
+        last_triggered   = 0.0
+        hit_streak       = 0
+        currently_active = False
+        drain_deadline   = 0.0  # monotonic time after which we go fully dark
+
         while True:
+            t_now = time.monotonic()
+
+            # After drain period, black out screen
+            if drain_deadline > 0.0 and t_now >= drain_deadline:
+                with params.lock:
+                    params.active = 0.0
+                drain_deadline = 0.0
+
             try:
                 if sensor.data_ready:
                     presence_value = float(sensor.presence_value)
-                    motion_value = float(sensor.motion_value)
-
-                    presence_hit = bool(sensor.presence)
-                    motion_hit = bool(sensor.motion)
+                    motion_value   = float(sensor.motion_value)
+                    presence_hit   = bool(sensor.presence)
+                    motion_hit     = bool(sensor.motion)
 
                     if presence_threshold > 0.0:
                         presence_hit = presence_hit and (presence_value >= presence_threshold)
@@ -368,19 +364,34 @@ def start_sensor_thread(params, cfg):
                         hit_streak = 0
 
                     if hit_streak >= trigger_hits:
-                        last_triggered = time.monotonic()
+                        last_triggered = t_now
             except Exception as exc:
                 log.warning("Sensor read error: %s", exc)
 
-            active = (time.monotonic() - last_triggered) < hold
-            target = float(ROWS) if active else 0.0
-            with params.lock:
-                params.sensor_active = 1.0 if active else 0.0
-                cur = params.reveal_rows
-                if cur < target:
-                    params.reveal_rows = min(target, cur + step)
-                elif cur > target:
-                    params.reveal_rows = max(target, cur - step)
+            sensor_firing = (t_now - last_triggered) < hold
+
+            if sensor_firing and not currently_active:
+                # Activate: open spawn gate from now; drops form off-screen then enter
+                with params.lock:
+                    params.active             = 1.0
+                    params.spawn_gate_start_abs = time.perf_counter()
+                    params.spawn_gate_stop_abs  = -1.0
+                currently_active = True
+                drain_deadline   = 0.0
+                log.debug("Sensor: activated")
+
+            elif not sensor_firing and currently_active:
+                # Deactivate: close spawn gate; in-flight drops drain off naturally
+                t_abs = time.perf_counter()
+                with params.lock:
+                    speed = params.speed
+                    trail = params.trail
+                    params.spawn_gate_stop_abs = t_abs
+                # Worst-case drain: drop just entering top needs ROWS+trail rows at min speed
+                drain_time = float(ROWS + trail) / max(speed * 0.5, 0.1) + 2.0
+                drain_deadline   = t_now + drain_time
+                currently_active = False
+                log.debug("Sensor: deactivated, drain in %.1fs", drain_time)
 
             time.sleep(poll_interval)
 
@@ -421,12 +432,8 @@ def main():
 
     # ── Live params ──────────────────────────────────────────────────────────
     sensor_enabled = cfg.getboolean("sensor", "enabled", fallback=False)
-    # If sensor is active, start hidden (reveal_rows=0); sensor thread ramps it up on presence.
-    # If no sensor, start fully visible (reveal_rows=ROWS).
-    initial_reveal = 0.0 if sensor_enabled else float(ROWS)
-    initial_sensor_active = 0.0 if sensor_enabled else 1.0
     params = Params(speed=speed, trail=trail, density=density, fps=fps, brightness=brightness,
-                    reveal_rows=initial_reveal, sensor_active=initial_sensor_active)
+                    sensor_enabled=sensor_enabled)
 
     # ── GL context (headless EGL, OpenGL ES 3.1) ────────────────────────────
     ctx = moderngl.create_standalone_context(backend="egl", libgl="libGLESv2.so", require=310)
@@ -456,9 +463,8 @@ def main():
     # ── Sensor thread ─────────────────────────────────────────────────────────
     start_sensor_thread(params, cfg)
     if sensor_enabled:
-        log.info("Sensor mode: rain hidden until presence detected (hold=%.1fs, ramp=%.1fs)",
-                 cfg.getfloat("sensor", "trigger_hold", fallback=10.0),
-                 cfg.getfloat("sensor", "ramp_time", fallback=1.5))
+        log.info("Sensor mode: rain hidden until presence detected (hold=%.1fs)",
+                 cfg.getfloat("sensor", "trigger_hold", fallback=10.0))
 
     # ── Graceful shutdown ────────────────────────────────────────────────────
     running = True
@@ -493,7 +499,7 @@ def main():
         t = frame_start - t0
 
         # Read live params
-        speed, trail, density, fps, brightness, reveal_rows, sensor_active = params.snapshot()
+        speed, trail, density, fps, brightness, active, spawn_gate_start_abs, spawn_gate_stop_abs = params.snapshot()
         frame_dur = 1.0 / fps
 
         try:
@@ -505,10 +511,16 @@ def main():
                 prog["uTrailLen"].value = trail
             if "uDensity" in prog:
                 prog["uDensity"].value = density
-            if "uRevealRows" in prog:
-                prog["uRevealRows"].value = reveal_rows
-            if "uSensorActive" in prog:
-                prog["uSensorActive"].value = sensor_active
+            if "uActive" in prog:
+                prog["uActive"].value = active
+            if "uSpawnGateStart" in prog:
+                prog["uSpawnGateStart"].value = (
+                    spawn_gate_start_abs - t0 if spawn_gate_start_abs >= 0.0 else -1.0
+                )
+            if "uSpawnGateStop" in prog:
+                prog["uSpawnGateStop"].value = (
+                    spawn_gate_stop_abs - t0 if spawn_gate_stop_abs >= 0.0 else -1.0
+                )
 
             fbo.use()
             vao.render(mode=moderngl.TRIANGLES, vertices=3)
