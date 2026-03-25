@@ -105,7 +105,16 @@ def build_remap_lut(pixel_map, color_order, num_pixels):
 
 # ── Live parameters (shared between main loop and OSC thread) ────────────────
 class Params:
-    def __init__(self, speed=4.0, trail=10, density=3.0, fps=30.0, brightness=1.0, reveal_rows=None):
+    def __init__(
+        self,
+        speed=4.0,
+        trail=10,
+        density=3.0,
+        fps=30.0,
+        brightness=1.0,
+        reveal_rows=None,
+        sensor_active=1.0,
+    ):
         self.speed = speed
         self.trail = trail
         self.density = density
@@ -114,6 +123,8 @@ class Params:
         # reveal_rows: 0.0 = fully hidden (sensor idle), ROWS = fully visible.
         # Defaults to ROWS so rain is visible when sensor is disabled.
         self.reveal_rows = float(ROWS) if reveal_rows is None else float(reveal_rows)
+        # 1.0 while sensor is actively revealing, 0.0 while idling/hiding.
+        self.sensor_active = float(sensor_active)
         self.lock = threading.Lock()
 
     def update(self, **kwargs):
@@ -124,7 +135,15 @@ class Params:
 
     def snapshot(self):
         with self.lock:
-            return self.speed, self.trail, self.density, self.fps, self.brightness, self.reveal_rows
+            return (
+                self.speed,
+                self.trail,
+                self.density,
+                self.fps,
+                self.brightness,
+                self.reveal_rows,
+                self.sensor_active,
+            )
 
 
 DEFAULT_CONFIG = """\
@@ -324,6 +343,7 @@ def start_sensor_thread(params, cfg):
             log.warning("Sensor unavailable (%s) — rain fully visible", exc)
             with params.lock:
                 params.reveal_rows = float(ROWS)
+                params.sensor_active = 1.0
             return
 
         last_triggered = 0.0
@@ -355,6 +375,7 @@ def start_sensor_thread(params, cfg):
             active = (time.monotonic() - last_triggered) < hold
             target = float(ROWS) if active else 0.0
             with params.lock:
+                params.sensor_active = 1.0 if active else 0.0
                 cur = params.reveal_rows
                 if cur < target:
                     params.reveal_rows = min(target, cur + step)
@@ -403,8 +424,9 @@ def main():
     # If sensor is active, start hidden (reveal_rows=0); sensor thread ramps it up on presence.
     # If no sensor, start fully visible (reveal_rows=ROWS).
     initial_reveal = 0.0 if sensor_enabled else float(ROWS)
+    initial_sensor_active = 0.0 if sensor_enabled else 1.0
     params = Params(speed=speed, trail=trail, density=density, fps=fps, brightness=brightness,
-                    reveal_rows=initial_reveal)
+                    reveal_rows=initial_reveal, sensor_active=initial_sensor_active)
 
     # ── GL context (headless EGL, OpenGL ES 3.1) ────────────────────────────
     ctx = moderngl.create_standalone_context(backend="egl", libgl="libGLESv2.so", require=310)
@@ -471,7 +493,7 @@ def main():
         t = frame_start - t0
 
         # Read live params
-        speed, trail, density, fps, brightness, reveal_rows = params.snapshot()
+        speed, trail, density, fps, brightness, reveal_rows, sensor_active = params.snapshot()
         frame_dur = 1.0 / fps
 
         try:
@@ -485,6 +507,8 @@ def main():
                 prog["uDensity"].value = density
             if "uRevealRows" in prog:
                 prog["uRevealRows"].value = reveal_rows
+            if "uSensorActive" in prog:
+                prog["uSensorActive"].value = sensor_active
 
             fbo.use()
             vao.render(mode=moderngl.TRIANGLES, vertices=3)

@@ -8,6 +8,7 @@ uniform float uSpeed;      // default ~4.0 (pixels per second)
 uniform int   uTrailLen;   // default 10 (pixels)
 uniform float uDensity;    // default 3.0 (>=1: drops per column, <1: probability of a drop)
 uniform float uRevealRows; // 0.0 = fully hidden (idle), 30.0 = fully visible (active)
+uniform float uSensorActive; // 1.0 while active/revealing, 0.0 while idle/hiding
 
 out vec4 fragColor;
 
@@ -84,12 +85,19 @@ void main()
 
     color = clamp(color, 0.0, 1.0);
 
-    // Sensor reveal mask: rows reveal top-first as uRevealRows increases 0→ROWS.
-    // Row ROWS-1 is the top edge; distFromTop=0 at top, ROWS-1 at bottom.
-    // Hide any row whose distFromTop >= uRevealRows (not yet revealed).
-    float distFromTop = float(ROWS - 1 - row);
-    if (distFromTop >= uRevealRows) {
-        color = vec3(0.0);
+    // Mask behavior:
+    // - active: reveal top-first (rain appears from off-screen top edge)
+    // - idle: hide top-first (existing rain continues draining downward off bottom)
+    if (uSensorActive >= 0.5) {
+        float distFromTop = float(ROWS - 1 - row);
+        if (distFromTop >= uRevealRows) {
+            color = vec3(0.0);
+        }
+    } else {
+        float distFromBottom = float(row);
+        if (distFromBottom >= uRevealRows) {
+            color = vec3(0.0);
+        }
     }
 
     fragColor = vec4(color, 1.0);
