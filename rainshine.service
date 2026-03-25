@@ -1,0 +1,15 @@
+[Unit]
+Description=Rainshine DMX Shader
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=pi
+WorkingDirectory=/home/pi/rainshine
+ExecStart=/home/pi/rainshine-env/bin/python3 /home/pi/rainshine/rainshine_dmx.py
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
