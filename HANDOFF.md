@@ -1,17 +1,29 @@
 # PiDMX — Session Handoff
-_Last updated: 2026-03-24_
+_Last updated: 2026-05-23_
 
-## Current State: WORKING ✓
+## Current State: WORKING ✓ — Baseline Monitor Active
 
-The installation is live, deployed, and running on the Pi. All known bugs from this session are resolved.
+The installation is live, deployed, and running on the Pi. A system-health baseline monitor is now logging continuously to catch a suspected long-term slowdown/leak (weeks-to-months timescale). No code changes were made to the shader or Python host.
 
 ---
 
 ## What Was Built This Session
 
+### Baseline Monitor (new)
+- **`/home/pi/rainshine/baseline_monitor.py`** — logs system + process metrics every 60s to `/home/pi/rainshine/monitor_data/metrics.csv`
+- Rolling baseline stats (min/mean/p95/max) recomputed hourly to `baseline.json`
+- Tracks: RSS, VSZ, FD count, thread count, V3D BO count, load, temp, GPU throttle, memory, disk, journal size
+- **`baseline_monitor.service`** — systemd unit, enabled, auto-starts on boot
+- **`/home/pi/rainshine/monitor_report.sh`** — one-shot report: current state vs baseline
+
+### Session Context
+- Shader and Python code were **not modified** (user request)
+- Suspected issue: after weeks-to-months of uptime, animation slows down; reboot fixes it
+- Current hypothesis: long-term memory/FD/V3D leak, or shader `uTime` precision loss in `mediump float`
+- Next step: wait for slowdown, then SSH in and compare live metrics against baseline
+
 ### Spawn-Gate Architecture (replaces all masking)
-- **Problem**: Previous approach masked rows to hide/reveal rain → drops got clipped, abrupt cutoffs.
-- **Solution**: Drops always spawn in an off-screen buffer `trailLen` rows above the visible panel.
+- Drops always spawn in an off-screen buffer `trailLen` rows above the visible panel.
   Once spawned, they travel their full lifecycle off the bottom, **never interrupted**.
 - Sensor ON → spawn gate opens → drops form off-screen and enter fully-formed from top.
 - Sensor OFF → spawn gate closes → existing drops drain naturally → screen goes dark on its own.
@@ -48,9 +60,9 @@ port = 7700
 
 [sensor]
 enabled = true
-trigger_hold = 10.0
-presence_threshold = 20.0
-motion_threshold = 15.0
+trigger_hold = 5.0
+presence_threshold = 2.0
+motion_threshold = 5.0
 trigger_hits = 1
 motion_brightness_base = 0.01
 motion_brightness_full = 150.0
@@ -60,9 +72,11 @@ motion_brightness_full = 150.0
 
 ## Current Git State
 - **Repo**: `jpkelly/PiDMX`, branch `main`
-- **Latest commit**: `2b61bb1` — `fix(sensor): remove motion_t snap-to-zero on hold expiry`
+- **Latest commit**: `d21a99c` — `Remove entry spawn buffer — drops appear instantly at top edge`
 - Mac workspace: `/Users/jp/Documents/GitHub/PiDMX`
 - Pi repo: `~/rainshine/`
+- Pi process uptime: ~2 days, 6 hours
+- Current health: 60.0 fps, RSS 106 MB, 12 FDs, 10 threads, temp 38–40°C, no throttling
 
 ---
 
@@ -128,6 +142,8 @@ c.send_message('/rainshine/brightness', 0.8)
 ---
 
 ## Diagnostics
+
+### Rainshine Service
 ```bash
 # Live logs
 journalctl -u rainshine -f
@@ -141,3 +157,25 @@ systemctl show rainshine --property=NRestarts
 # Memory check
 free -h
 ```
+
+### Baseline Monitor
+```bash
+# Quick report (current state vs rolling baseline)
+/home/pi/rainshine/monitor_report.sh
+
+# Raw metrics
+head -1 /home/pi/rainshine/monitor_data/metrics.csv
+tail -20 /home/pi/rainshine/monitor_data/metrics.csv
+
+# Baseline stats
+python3 -c "import json; print(json.dumps(json.load(open('/home/pi/rainshine/monitor_data/baseline.json')), indent=2))"
+
+# Monitor service status
+systemctl status baseline_monitor --no-pager
+journalctl -u baseline_monitor -f
+```
+
+### When Slowdown Occurs
+1. Run `/home/pi/rainshine/monitor_report.sh` on the Pi
+2. Check which metrics have drifted from baseline (RSS, FDs, V3D BOs, load, temp)
+3. Do NOT reboot until diagnostics are captured
