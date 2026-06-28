@@ -15,7 +15,17 @@ out vec4 fragColor;
 
 // --- helpers ---------------------------------------------------------------
 float hash(float n) { return fract(sin(n * 127.1) * 43758.5453123); }
-float hash2(float a, float b) { return fract(sin(a * 127.1 + b * 311.7) * 43758.5453123); }
+
+// hash2 with safe cycleIdx wrapping — prevents sin() precision collapse
+// when cycleIdx exceeds ~100,000 (after ~4 days uptime).  Two coprime
+// moduli give a combined period of ~50M cycles (>5 years at speed=25).
+float hash2(float a, float b) {
+    float b1 = mod(b, 7919.0);   // prime, period ~7 hr
+    float b2 = mod(b, 6271.0);   // prime, period ~5.5 hr
+    float h1 = fract(sin(a * 127.1 + b1 * 311.7) * 43758.5453123);
+    float h2 = fract(sin(a * 311.7 + b2 * 127.1) * 23421.6312);
+    return fract(h1 + h2);
+}
 
 vec3 hsv2rgb(float h, float s, float v) {
     vec3 k = mod(vec3(h * 6.0, h * 6.0 - 2.0, h * 6.0 - 4.0), 6.0);
